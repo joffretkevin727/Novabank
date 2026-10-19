@@ -196,5 +196,109 @@ sudo -u postgres psql -d bankdb -c "SELECT c.compte_id, c.solde, e.balance_after
 
 ---
 
-================================================================================
+## E3 — SÉCURITÉ ET PRIVILÈGES D'ACCÈS
+
+### 1. PRINCIPE APPLIQUÉ
+
+Mise en œuvre du principe de moindre privilège et de la « règle des trois portes » :
+
+1. Droit de connexion au niveau base (`CONNECT`).
+2. Droit de traversée du schéma (`USAGE`).
+3. Droit granulaire sur les objets (`SELECT`, `INSERT`, `UPDATE`).
+
+Révocation préalable de tous les accès résiduels hérités du pseudo-rôle `PUBLIC`.
+
+### 2. SCRIPT DE CONFIGURATION : `~/novabank/sql/e3_01_privileges.sql`
+
+Structure mise en place :
+
+- **Groupes NOLOGIN :** `app_grp`, `analystes`, `support`, `auditeurs`.
+- **Utilisateurs LOGIN :** `app_user`, `analyste_user`, `support_user`, `auditeur_user`.
+- **Garde-fous :** `statement_timeout` configuré pour les profils de consultation.
+- **Persistance :** `ALTER DEFAULT PRIVILEGES` appliqués pour garantir les droits sur les tables futures.
+
+### 3. SCRIPT DE VÉRIFICATION : `~/novabank/sql/e3_02_privileges_tests.sql`
+
+### 4. EXÉCUTION ET VALIDATION
+
+**Commandes :**
+
+```bash
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e3_01_privileges.sql
+
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e3_02_privileges_tests.sql
+```
+
+**Matrice de contrôle des droits :**
+
+```bash
+sudo -u postgres psql -d bankdb -c "SELECT grantee, table_schema, table_name, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'core' ORDER BY grantee, table_name, privilege_type;"
+```
+
+---
+
+## E4 — LES VUES (SÉCURITÉ, CONTRÔLE ET PERFORMANCE)
+
+### 1. PRINCIPE ET OBJECTIFS
+
+Exposer les données sous contrôle strict :
+
+- Masquer les données sensibles pour le support sans fuite via l'optimiseur (`security_barrier`).
+- Permettre la mise à jour via vue tout en verrouillant le périmètre métier (`WITH LOCAL CHECK OPTION`).
+- Pré-agréger des métriques de reporting rafraîchissables à chaud sans bloquer les lectures (`REFRESH MATERIALIZED VIEW CONCURRENTLY`).
+
+### 2. SCRIPT DE CRÉATION : `~/novabank/sql/e4_01_views_creation.sql`
+
+**Objets créés :**
+
+- **`core.v_clients_support` :** vue dotée de `security_barrier = true`. Les champs `nom` et `prenom` sont masqués (initiale + `***`), `date_naissance` est tronquée à l'année. Droit `SELECT` accordé au groupe `support`.
+- **`core.v_comptes_courants` :** vue filtrant sur `type = 'courant'` avec clause `WITH LOCAL CHECK OPTION`. Droit de modification ciblé `UPDATE(solde, type)` accordé au groupe `app_grp`.
+- **`core.mv_synthese_clients` :** vue matérialisée calculant le nombre de comptes et l'encours total par client. Indexée de manière unique sur `client_id` (`idx_mv_synthese_clients_id`). Droit `SELECT` accordé aux `analystes`.
+
+### 3. SCRIPT DE VALIDATION : `~/novabank/sql/e4_02_views_tests.sql`
+
+### 4. EXÉCUTION ET VALIDATION
+
+**Commandes :**
+
+```bash
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e4_01_views_creation.sql
+
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e4_02_views_tests.sql
+```
+
+#### Contrôles de validation
+
+**Validation du masquage support :**
+
+```bash
+sudo -u postgres psql -d bankdb -c "SET ROLE support_user; SELECT * FROM core.v_clients_support LIMIT 3; RESET ROLE;"
+```
+
+Résultat attendu : prénoms et noms masqués sous forme `P***`, `N***`.
+
+**Validation du rejet CHECK OPTION :**
+
+```bash
+sudo -u postgres psql -d bankdb -c "SET ROLE app_user; UPDATE core.v_comptes_courants SET type = 'epargne'::core.type_compte WHERE compte_id = (SELECT compte_id FROM core.v_comptes_courants LIMIT 1); RESET ROLE;"
+```
+
+Résultat attendu :
+
+```text
+ERROR: new row violates check option for view "v_comptes_courants"
+```
+
+**Validation du rafraîchissement concurrentiel :**
+
+```bash
+sudo -u postgres psql -d bankdb -c "REFRESH MATERIALIZED VIEW CONCURRENTLY core.mv_synthese_clients;"
+
+sudo -u postgres psql -d bankdb -c "SET ROLE analyste_user; SELECT * FROM core.mv_synthese_clients LIMIT 3; RESET ROLE;"
+```
+
+Résultat attendu : rafraîchissement sans verrouillage exclusif sur les lectures.
+
+---
+
 
