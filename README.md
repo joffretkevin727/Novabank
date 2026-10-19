@@ -301,4 +301,65 @@ Résultat attendu : rafraîchissement sans verrouillage exclusif sur les lecture
 
 ---
 
+## E5 — LES INDEX ET MESURES DE PERFORMANCE
+
+### 1. PRINCIPE ET STRATÉGIE D'INDEXATION
+
+Comprendre l'impact des index sur les temps de réponse et l'empreinte disque :
+
+- **B-tree composite :** optimisation simultanée du filtrage par clé étrangère et du tri chronologique.
+- **Index fonctionnel :** indexation d'une transformation (`lower(nom)`) pour les recherches insensibles à la casse.
+- **Index GIN (trigrammes via `pg_trgm`) :** accélération des recherches partielles (`ILIKE '%motif%'`).
+- **Index partiel :** indexation exclusive d'une minorité ciblée (`WHERE statut != 'actif'`) pour une empreinte disque minimale.
+- **Index BRIN (Block Range Index) :** indexation compacte sur colonne corrélée à l'ordre physique des blocs.
+
+### 2. SCRIPTS DE DÉPLOIEMENT ET DE MESURE
+
+- **Script de création :** `~/novabank/sql/e5_01_indexes_creation.sql`
+- **Script d'évaluation (`EXPLAIN ANALYZE`) :** `~/novabank/sql/e5_02_indexes_benchmarks.sql`
+
+### 3. EXÉCUTION
+
+```bash
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e5_01_indexes_creation.sql
+
+sudo -u postgres psql -d bankdb -f ~/novabank/sql/e5_02_indexes_benchmarks.sql
+```
+
+### 4. RÉSULTATS DES MESURES (EXPLAIN ANALYZE ET TAILLES)
+
+#### a) Relevé de compte filtré et trié (1M lignes)
+
+- **Index utilisé :** `core.idx_ecritures_compte_date` (`compte_id`, `date_operation DESC`)
+- **Plan :** Index Scan (Index Searches: 1, limit 50 rows)
+- **Buffers :** 8 blocs partagés (`shared hit=4 read=4`)
+- **Temps d'exécution :** 0.741 ms (aucun tri mémoire nécessaire)
+
+#### b) Recherche insensible à la casse
+
+- **Index utilisé :** `core.idx_clients_lower_nom` (`lower(nom)`)
+- **Plan :** Index Scan sur `lower(nom) = 'dupont'`
+- **Buffers :** 2 blocs (`shared read=2`)
+- **Temps d'exécution :** 0.152 ms
+
+#### c) Recherche floue avec trigrammes
+
+- **Index utilisé :** `core.idx_clients_nom_trgm` (GIN)
+- **Plan :** Bitmap Index Scan sur `nom ILIKE '%pon%'`
+- **Buffers :** 3 blocs (`shared hit=3`)
+- **Temps d'exécution :** 0.237 ms
+
+#### d) Sélectivité et index inutile (Seq Scan)
+
+- **Requête :** `COUNT(*)` sur `type = 'courant'`
+- **Plan :** Seq Scan sur `comptes` (334 blocs lus)
+- **Constat :** L'optimiseur ignore les index quand la sélectivité est trop faible (ici 100 % de comptes courants) pour privilégier la lecture séquentielle continue.
+
+#### e) Empreinte disque comparée
+
+- **Table `core.ecritures` :** 73 MB de données, index composite B-tree à 30 MB.
+- **Index BRIN (`core.idx_ecritures_brin_date`) :** 24 kB seulement (facteur de réduction supérieur à x1000 par rapport à un B-tree).
+- **Index partiel (`core.idx_clients_statut_inactif`) :** 8192 bytes (1 bloc unique de 8 Ko).
+
+---
 
