@@ -1,0 +1,5 @@
+*.key
+*.pub
+*.dump
+*.log
+*.env
