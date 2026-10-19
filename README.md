@@ -1,365 +1,588 @@
-# README — DÉPLOIEMENT ET ADMINISTRATION NOVABANK (E0, E1, DÉBUT E2)
 
-## E0 — LA VM, SSH ET GIT
+# NovaBank — Installation et administration PostgreSQL
 
-### 1. CONFIGURATION RÉSEAU (VIRTUALBOX)
+## Sommaire
 
-Dans les paramètres de la machine virtuelle éteinte :
+- [E0 — Préparation de l'environnement](#e0--préparation-de-lenvironnement)
+- [E1 — Installation du serveur PostgreSQL](#e1--installation-du-serveur-postgresql)
+- [E2 — Création de la base et des données](#e2--création-de-la-base-et-des-données)
+- [E3 — Gestion des rôles et des privilèges](#e3--gestion-des-rôles-et-des-privilèges)
+- [E4 — Vues et vues matérialisées](#e4--vues-et-vues-matérialisées)
+- [E5 — Indexation et benchmarks](#e5--indexation-et-benchmarks)
 
-- **Carte 1 :** attachée au mode NAT (accès Internet pour les paquets).
-- **Carte 2 :** attachée au mode Réseau privé hôte (Host-only) pour communiquer avec le PC hôte.
+---
 
-### 2. NOM D'HÔTE ET IP FIXE (NETPLAN)
+# E0 — Préparation de l'environnement
 
-Sur la VM Ubuntu :
+## 1. Configuration de la machine virtuelle
 
-#### a) Définir le nom d'hôte
+La machine virtuelle Ubuntu est configurée avec VirtualBox et deux interfaces réseau :
+
+- **NAT (`enp0s3`)** : accès à Internet.
+- **Host-only (`enp0s8`)** : communication entre Windows et Ubuntu.
+
+Le nom d'hôte de la machine est `dbpostgre`.
+
+### Configuration réseau
+
+Éditer le fichier Netplan :
 
 ```bash
-sudo hostnamectl set-hostname dbpostgre
+sudo nano /etc/netplan/50-cloud-init.yaml
 ```
 
-#### b) Repérer le nom de la seconde interface réseau sans IP
-
-```bash
-ip -br a
-```
-
-#### c) Configurer l'adresse IP fixe via Netplan (utiliser des espaces, pas de tabulations)
-
-```bash
-sudo nano /etc/netplan/01-netcfg.yaml
-```
-
-Contenu du fichier YAML :
+Exemple de configuration :
 
 ```yaml
 network:
   version: 2
-  renderer: networkd
   ethernets:
     enp0s3:
       dhcp4: true
     enp0s8:
+      dhcp4: false
       addresses:
         - 192.168.56.10/24
 ```
 
-#### d) Appliquer les réglages
+Appliquer la configuration :
 
 ```bash
 sudo netplan apply
 ```
 
-### 3. AUTHENTIFICATION SSH PAR CLÉ
+Vérifier les interfaces :
 
-Depuis le terminal PowerShell sur Windows :
-
-#### a) Générer la paire de clés Ed25519
-
-```powershell
-ssh-keygen -t ed25519
+```bash
+ip addr
 ```
 
-#### b) Envoyer la clé publique sur la VM
+## 2. Connexion SSH depuis Windows
+
+Depuis PowerShell, envoyer la clé publique SSH vers Ubuntu :
 
 ```powershell
-type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh kevin@192.168.56.10 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh kevin@192.168.56.10 "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys"
 ```
 
-#### c) Tester la connexion sans mot de passe
+Se connecter à la machine virtuelle :
 
 ```powershell
 ssh kevin@192.168.56.10
 ```
 
-### 4. CONFIGURATION DU DÉPÔT GIT
+## 3. Configuration de Git
 
-Dans la session SSH sur la VM :
+Configurer l'identité Git :
 
 ```bash
-git config --global user.name "Kevin"
-git config --global user.email "kevin@exemple.com"
-
-mkdir -p ~/novabank && cd ~/novabank
-
-git init
+git config --global user.name "Votre Nom"
+git config --global user.email "votre.email@example.com"
 ```
 
-Créer le fichier `.gitattributes` (pour forcer les fins de ligne Unix LF) :
+Créer le fichier `.gitattributes` :
 
-```bash
-cat << 'EOF' > .gitattributes
+```gitattributes
 * text=auto
 *.sh text eol=lf
-EOF
+*.sql text eol=lf
+*.md text eol=lf
 ```
 
 Créer le fichier `.gitignore` :
 
-```bash
-cat << 'EOF' > .gitignore
-*.key
-*.pub
-*.dump
-*.sql.gz
+```gitignore
 *.log
+*.tmp
 .env
-EOF
+.DS_Store
 ```
 
-#### Premier commit
+Initialiser le dépôt Git et créer le premier commit :
 
 ```bash
-git add .gitattributes .gitignore
-
-git commit -m "chore: configuration initiale git, gitignore et gitattributes"
+git init
+git add .
+git commit -m "Initialisation du projet NovaBank"
 ```
 
 ---
 
-## E1 — LE SERVEUR POSTGRESQL 18 & SÉCURISATION UFW
+# E1 — Installation du serveur PostgreSQL
 
-### 1. SCRIPT D'INSTALLATION : 
+## 1. Exécution du script d'installation
 
-`~/novabank/install_server.sh`
+Le script d'installation est situé dans :
 
-### 2. EXÉCUTION ET VALIDATION
+```text
+~/novabank/install_server.sh
+```
+
+Le rendre exécutable puis le lancer :
 
 ```bash
 chmod +x ~/novabank/install_server.sh
-
 sudo ~/novabank/install_server.sh
 ```
 
-#### Commandes de vérification
+Le script prépare le serveur PostgreSQL et configure notamment son accès réseau et les règles de connexion.
 
-**Vérifier l'état du cluster :**
+## 2. Vérifications
+
+Vérifier l'état du cluster PostgreSQL :
 
 ```bash
 pg_lsclusters
 ```
 
-**Vérifier l'écoute réseau :**
+Vérifier la configuration d'écoute :
 
 ```bash
 sudo -u postgres psql -c "SHOW listen_addresses;"
 ```
 
-**Vérifier l'absence d'erreurs dans `pg_hba.conf` :**
+Vérifier les règles d'authentification :
 
 ```bash
-sudo -u postgres psql -c "SELECT line_number, user_name, auth_method, error FROM pg_hba_file_rules;"
+sudo -u postgres psql -c "SELECT * FROM pg_hba_file_rules;"
 ```
 
 ---
 
-## E2 — LES TABLES ET LES DONNÉES (EN COURS)
+# E2 — Création de la base et des données
 
-### 1. INITIALISATION DU RÔLE ET DE LA BASE
+## 1. Création du rôle et de la base
 
-Exécuter sur la VM :
+Ouvrir une session PostgreSQL :
 
 ```bash
-sudo -u postgres psql -c "CREATE ROLE bank_owner WITH LOGIN CREATEDB;"
-
-sudo -u postgres psql -c "\password bank_owner"
-
-sudo -u postgres psql -c "CREATE DATABASE bankdb OWNER bank_owner;"
-
-sudo -u postgres psql -d bankdb -c "CREATE SCHEMA core AUTHORIZATION bank_owner;"
+sudo -u postgres psql
 ```
 
-### 2. SCRIPT DE CRÉATION ET D'INJECTION : 
+Créer le rôle propriétaire :
 
-`~/novabank/init_db.sql`
-
-### 3. EXÉCUTION VIA REDIRECTION DE FLUX
-
-```bash
-sudo -u postgres psql < ~/novabank/init_db.sql
+```sql
+CREATE ROLE bank_owner LOGIN CREATEDB;
 ```
 
-### 4. CONTRÔLES DE VALIDATION
+Définir son mot de passe de manière interactive :
 
-#### Nombre d'écritures (attendu : 1000000)
-
-```bash
-sudo -u postgres psql -d bankdb -c "SELECT count(*) FROM core.ecritures;"
+```text
+\password bank_owner
 ```
 
-#### Cohérence des soldes et absence de solde négatif (attendu : 0 ligne)
+Créer la base de données :
+
+```sql
+CREATE DATABASE bankdb OWNER bank_owner;
+```
+
+Quitter PostgreSQL :
+
+```text
+\q
+```
+
+## 2. Initialisation du schéma
+
+Le script d'initialisation est situé dans :
+
+```text
+~/novabank/init_db.sql
+```
+
+L'exécuter sur la base `bankdb` :
 
 ```bash
-sudo -u postgres psql -d bankdb -c "SELECT c.compte_id, c.solde, e.balance_after FROM core.comptes c JOIN (SELECT DISTINCT ON (compte_id) compte_id, balance_after FROM core.ecritures ORDER BY compte_id, date_operation DESC) e ON c.compte_id = e.compte_id WHERE c.solde != e.balance_after OR c.solde < 0;"
+sudo -u postgres psql -d bankdb -f ~/novabank/init_db.sql
+```
+
+Ce script initialise le schéma et les données du projet NovaBank.
+
+## 3. Vérification des données
+
+Se connecter à la base :
+
+```bash
+sudo -u postgres psql -d bankdb
+```
+
+Vérifier le nombre d'écritures :
+
+```sql
+SELECT COUNT(*) FROM core.ecritures;
+```
+
+Le jeu de données attendu contient environ **1 000 000 d'écritures**, selon le script d'initialisation utilisé.
+
+Vérifier la cohérence des écritures :
+
+```sql
+SELECT
+    COUNT(*) AS nombre_ecritures,
+    COUNT(*) FILTER (WHERE montant IS NULL) AS montants_nuls
+FROM core.ecritures;
+```
+
+Quitter :
+
+```text
+\q
 ```
 
 ---
 
-## E3 — SÉCURITÉ ET PRIVILÈGES D'ACCÈS
+# E3 — Gestion des rôles et des privilèges
 
-### 1. PRINCIPE APPLIQUÉ
+## 1. Objectif
 
-Mise en œuvre du principe de moindre privilège et de la « règle des trois portes » :
+Mettre en place une gestion des accès selon le principe du moindre privilège.
 
-1. Droit de connexion au niveau base (`CONNECT`).
-2. Droit de traversée du schéma (`USAGE`).
-3. Droit granulaire sur les objets (`SELECT`, `INSERT`, `UPDATE`).
+Les groupes de rôles sont :
 
-Révocation préalable de tous les accès résiduels hérités du pseudo-rôle `PUBLIC`.
+| Groupe | Fonction |
+|---|---|
+| `app_grp` | Application bancaire |
+| `analystes` | Analyse et consultation des données |
+| `support` | Assistance clientèle |
+| `auditeurs` | Contrôle et audit |
 
-### 2. SCRIPT DE CONFIGURATION : `~/novabank/sql/e3_01_privileges.sql`
+Les utilisateurs associés sont :
 
-Structure mise en place :
+| Utilisateur | Groupe |
+|---|---|
+| `app_user` | `app_grp` |
+| `analyste_user` | `analystes` |
+| `support_user` | `support` |
+| `auditeur_user` | `auditeurs` |
 
-- **Groupes NOLOGIN :** `app_grp`, `analystes`, `support`, `auditeurs`.
-- **Utilisateurs LOGIN :** `app_user`, `analyste_user`, `support_user`, `auditeur_user`.
-- **Garde-fous :** `statement_timeout` configuré pour les profils de consultation.
-- **Persistance :** `ALTER DEFAULT PRIVILEGES` appliqués pour garantir les droits sur les tables futures.
+## 2. Scripts SQL
 
-### 3. SCRIPT DE VÉRIFICATION : `~/novabank/sql/e3_02_privileges_tests.sql`
+Les scripts de cette étape se trouvent dans :
 
-### 4. EXÉCUTION ET VALIDATION
+```text
+~/novabank/sql/e3_01_privileges.sql
+~/novabank/sql/e3_02_privileges_tests.sql
+```
 
-**Commandes :**
+Exécuter le script de configuration des privilèges :
 
 ```bash
 sudo -u postgres psql -d bankdb -f ~/novabank/sql/e3_01_privileges.sql
+```
 
+Exécuter le script de tests :
+
+```bash
 sudo -u postgres psql -d bankdb -f ~/novabank/sql/e3_02_privileges_tests.sql
 ```
 
-**Matrice de contrôle des droits :**
+## 3. Contrôle des droits
 
-```bash
-sudo -u postgres psql -d bankdb -c "SELECT grantee, table_schema, table_name, privilege_type FROM information_schema.role_table_grants WHERE table_schema = 'core' ORDER BY grantee, table_name, privilege_type;"
+Vérifier les rôles existants :
+
+```sql
+SELECT
+    rolname,
+    rolsuper,
+    rolcreatedb,
+    rolcanlogin
+FROM pg_roles
+WHERE rolname IN (
+    'app_grp',
+    'analystes',
+    'support',
+    'auditeurs',
+    'app_user',
+    'analyste_user',
+    'support_user',
+    'auditeur_user'
+)
+ORDER BY rolname;
 ```
+
+Vérifier les privilèges sur les tables :
+
+```sql
+SELECT
+    grantee,
+    table_schema,
+    table_name,
+    privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema = 'core'
+ORDER BY grantee, table_name, privilege_type;
+```
+
+## 4. Paramètres de sécurité
+
+Le script de configuration peut également définir des paramètres de session, notamment `statement_timeout`, afin de limiter la durée d'exécution des requêtes.
+
+Les privilèges par défaut peuvent être configurés avec `ALTER DEFAULT PRIVILEGES` pour appliquer automatiquement certains droits aux futurs objets créés par le rôle concerné.
 
 ---
 
-## E4 — LES VUES (SÉCURITÉ, CONTRÔLE ET PERFORMANCE)
+# E4 — Vues et vues matérialisées
 
-### 1. PRINCIPE ET OBJECTIFS
+## 1. Vue de support : `core.v_clients_support`
 
-Exposer les données sous contrôle strict :
+Cette vue expose les informations nécessaires au support tout en limitant l'accès aux données personnelles.
 
-- Masquer les données sensibles pour le support sans fuite via l'optimiseur (`security_barrier`).
-- Permettre la mise à jour via vue tout en verrouillant le périmètre métier (`WITH LOCAL CHECK OPTION`).
-- Pré-agréger des métriques de reporting rafraîchissables à chaud sans bloquer les lectures (`REFRESH MATERIALIZED VIEW CONCURRENTLY`).
+Les noms sont masqués et la date de naissance est ramenée à l'année.
 
-### 2. SCRIPT DE CRÉATION : `~/novabank/sql/e4_01_views_creation.sql`
+Exemple de définition :
 
-**Objets créés :**
-
-- **`core.v_clients_support` :** vue dotée de `security_barrier = true`. Les champs `nom` et `prenom` sont masqués (initiale + `***`), `date_naissance` est tronquée à l'année. Droit `SELECT` accordé au groupe `support`.
-- **`core.v_comptes_courants` :** vue filtrant sur `type = 'courant'` avec clause `WITH LOCAL CHECK OPTION`. Droit de modification ciblé `UPDATE(solde, type)` accordé au groupe `app_grp`.
-- **`core.mv_synthese_clients` :** vue matérialisée calculant le nombre de comptes et l'encours total par client. Indexée de manière unique sur `client_id` (`idx_mv_synthese_clients_id`). Droit `SELECT` accordé aux `analystes`.
-
-### 3. SCRIPT DE VALIDATION : `~/novabank/sql/e4_02_views_tests.sql`
-
-### 4. EXÉCUTION ET VALIDATION
-
-**Commandes :**
-
-```bash
-sudo -u postgres psql -d bankdb -f ~/novabank/sql/e4_01_views_creation.sql
-
-sudo -u postgres psql -d bankdb -f ~/novabank/sql/e4_02_views_tests.sql
+```sql
+CREATE OR REPLACE VIEW core.v_clients_support
+WITH (security_barrier = true)
+AS
+SELECT
+    id_client,
+    'Client masqué'::text AS nom,
+    EXTRACT(YEAR FROM date_naissance)::integer AS annee_naissance
+FROM core.clients;
 ```
 
-#### Contrôles de validation
+Accorder l'accès au groupe support :
 
-**Validation du masquage support :**
-
-```bash
-sudo -u postgres psql -d bankdb -c "SET ROLE support_user; SELECT * FROM core.v_clients_support LIMIT 3; RESET ROLE;"
+```sql
+GRANT SELECT ON core.v_clients_support TO support;
 ```
 
-Résultat attendu : prénoms et noms masqués sous forme `P***`, `N***`.
+La vue permet au support de consulter les informations nécessaires sans exposer directement les noms complets.
 
-**Validation du rejet CHECK OPTION :**
+## 2. Vue modifiable : `core.v_comptes_courants`
 
-```bash
-sudo -u postgres psql -d bankdb -c "SET ROLE app_user; UPDATE core.v_comptes_courants SET type = 'epargne'::core.type_compte WHERE compte_id = (SELECT compte_id FROM core.v_comptes_courants LIMIT 1); RESET ROLE;"
+Cette vue limite les données visibles aux comptes courants.
+
+```sql
+CREATE OR REPLACE VIEW core.v_comptes_courants AS
+SELECT
+    id_compte,
+    id_client,
+    solde,
+    type
+FROM core.comptes
+WHERE type = 'courant'
+WITH LOCAL CHECK OPTION;
 ```
 
-Résultat attendu :
+Accorder les droits de consultation et de modification :
+
+```sql
+GRANT SELECT ON core.v_comptes_courants TO app_grp;
+GRANT UPDATE (solde, type) ON core.v_comptes_courants TO app_grp;
+```
+
+La clause `WITH LOCAL CHECK OPTION` empêche une modification via cette vue de créer une ligne qui ne respecte plus son filtre.
+
+## 3. Vue matérialisée : `core.mv_synthese_clients`
+
+La vue matérialisée stocke une synthèse des comptes par client.
+
+```sql
+CREATE MATERIALIZED VIEW core.mv_synthese_clients AS
+SELECT
+    c.id_client,
+    COUNT(co.id_compte) AS nombre_comptes,
+    COALESCE(SUM(co.solde), 0) AS solde_total
+FROM core.clients c
+LEFT JOIN core.comptes co
+    ON co.id_client = c.id_client
+GROUP BY c.id_client;
+```
+
+Créer un index unique pour permettre le rafraîchissement concurrent :
+
+```sql
+CREATE UNIQUE INDEX idx_mv_synthese_clients_id
+ON core.mv_synthese_clients (id_client);
+```
+
+Autoriser les analystes à consulter la synthèse :
+
+```sql
+GRANT SELECT ON core.mv_synthese_clients TO analystes;
+```
+
+Rafraîchir la vue matérialisée :
+
+```sql
+REFRESH MATERIALIZED VIEW CONCURRENTLY core.mv_synthese_clients;
+```
+
+**À noter :** le rafraîchissement concurrent nécessite un index unique approprié et une vue matérialisée déjà remplie.
+
+## 4. Tests de validation
+
+Vérifier la vue de support :
+
+```sql
+SELECT *
+FROM core.v_clients_support
+LIMIT 10;
+```
+
+Vérifier la vue des comptes courants :
+
+```sql
+SELECT *
+FROM core.v_comptes_courants
+LIMIT 10;
+```
+
+Vérifier la synthèse :
+
+```sql
+SELECT *
+FROM core.mv_synthese_clients
+LIMIT 10;
+```
+
+Les tests doivent confirmer que les informations personnelles sont masquées, que la vue des comptes courants respecte son filtre et que les analystes peuvent consulter la synthèse.
+
+---
+
+# E5 — Indexation et benchmarks
+
+## 1. Objectif
+
+L'objectif est de comparer plusieurs stratégies d'indexation PostgreSQL et d'observer leur effet sur les performances des requêtes.
+
+Les scripts de cette étape sont :
 
 ```text
-ERROR: new row violates check option for view "v_comptes_courants"
+~/novabank/sql/e5_01_indexes_creation.sql
+~/novabank/sql/e5_02_indexes_benchmarks.sql
 ```
 
-**Validation du rafraîchissement concurrentiel :**
-
-```bash
-sudo -u postgres psql -d bankdb -c "REFRESH MATERIALIZED VIEW CONCURRENTLY core.mv_synthese_clients;"
-
-sudo -u postgres psql -d bankdb -c "SET ROLE analyste_user; SELECT * FROM core.mv_synthese_clients LIMIT 3; RESET ROLE;"
-```
-
-Résultat attendu : rafraîchissement sans verrouillage exclusif sur les lectures.
-
----
-
-## E5 — LES INDEX ET MESURES DE PERFORMANCE
-
-### 1. PRINCIPE ET STRATÉGIE D'INDEXATION
-
-Comprendre l'impact des index sur les temps de réponse et l'empreinte disque :
-
-- **B-tree composite :** optimisation simultanée du filtrage par clé étrangère et du tri chronologique.
-- **Index fonctionnel :** indexation d'une transformation (`lower(nom)`) pour les recherches insensibles à la casse.
-- **Index GIN (trigrammes via `pg_trgm`) :** accélération des recherches partielles (`ILIKE '%motif%'`).
-- **Index partiel :** indexation exclusive d'une minorité ciblée (`WHERE statut != 'actif'`) pour une empreinte disque minimale.
-- **Index BRIN (Block Range Index) :** indexation compacte sur colonne corrélée à l'ordre physique des blocs.
-
-### 2. SCRIPTS DE DÉPLOIEMENT ET DE MESURE
-
-- **Script de création :** `~/novabank/sql/e5_01_indexes_creation.sql`
-- **Script d'évaluation (`EXPLAIN ANALYZE`) :** `~/novabank/sql/e5_02_indexes_benchmarks.sql`
-
-### 3. EXÉCUTION
+Exécuter la création des index :
 
 ```bash
 sudo -u postgres psql -d bankdb -f ~/novabank/sql/e5_01_indexes_creation.sql
+```
 
+Exécuter les benchmarks :
+
+```bash
 sudo -u postgres psql -d bankdb -f ~/novabank/sql/e5_02_indexes_benchmarks.sql
 ```
 
-### 4. RÉSULTATS DES MESURES (EXPLAIN ANALYZE ET TAILLES)
+## 2. Stratégies étudiées
 
-#### a) Relevé de compte filtré et trié (1M lignes)
+### Index B-tree composite
 
-- **Index utilisé :** `core.idx_ecritures_compte_date` (`compte_id`, `date_operation DESC`)
-- **Plan :** Index Scan (Index Searches: 1, limit 50 rows)
-- **Buffers :** 8 blocs partagés (`shared hit=4 read=4`)
-- **Temps d'exécution :** 0.741 ms (aucun tri mémoire nécessaire)
+Un index B-tree composite est utile lorsque les requêtes filtrent sur plusieurs colonnes.
 
-#### b) Recherche insensible à la casse
+Exemple :
 
-- **Index utilisé :** `core.idx_clients_lower_nom` (`lower(nom)`)
-- **Plan :** Index Scan sur `lower(nom) = 'dupont'`
-- **Buffers :** 2 blocs (`shared read=2`)
-- **Temps d'exécution :** 0.152 ms
+```sql
+CREATE INDEX idx_ecritures_compte_date
+ON core.ecritures (id_compte, date_operation);
+```
 
-#### c) Recherche floue avec trigrammes
+### Index fonctionnel
 
-- **Index utilisé :** `core.idx_clients_nom_trgm` (GIN)
-- **Plan :** Bitmap Index Scan sur `nom ILIKE '%pon%'`
-- **Buffers :** 3 blocs (`shared hit=3`)
-- **Temps d'exécution :** 0.237 ms
+Un index fonctionnel peut accélérer les recherches insensibles à la casse lorsque la requête utilise la même expression.
 
-#### d) Sélectivité et index inutile (Seq Scan)
+```sql
+CREATE INDEX idx_clients_nom_lower
+ON core.clients (lower(nom));
+```
 
-- **Requête :** `COUNT(*)` sur `type = 'courant'`
-- **Plan :** Seq Scan sur `comptes` (334 blocs lus)
-- **Constat :** L'optimiseur ignore les index quand la sélectivité est trop faible (ici 100 % de comptes courants) pour privilégier la lecture séquentielle continue.
+Exemple de requête compatible :
 
-#### e) Empreinte disque comparée
+```sql
+SELECT *
+FROM core.clients
+WHERE lower(nom) = lower('Dupont');
+```
 
-- **Table `core.ecritures` :** 73 MB de données, index composite B-tree à 30 MB.
-- **Index BRIN (`core.idx_ecritures_brin_date`) :** 24 kB seulement (facteur de réduction supérieur à x1000 par rapport à un B-tree).
-- **Index partiel (`core.idx_clients_statut_inactif`) :** 8192 bytes (1 bloc unique de 8 Ko).
+### Index GIN avec trigrammes
+
+L'extension `pg_trgm` permet d'accélérer certaines recherches textuelles, notamment les recherches partielles.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX idx_clients_nom_trgm
+ON core.clients
+USING GIN (nom gin_trgm_ops);
+```
+
+Exemple :
+
+```sql
+SELECT *
+FROM core.clients
+WHERE nom ILIKE '%dup%';
+```
+
+### Index partiel
+
+Un index partiel ne conserve que les lignes correspondant à une condition.
+
+```sql
+CREATE INDEX idx_comptes_inactifs
+ON core.comptes (id_client)
+WHERE statut != 'actif';
+```
+
+Il peut réduire la taille de l'index si seule une partie des lignes est concernée par les requêtes.
+
+### Index BRIN
+
+Un index BRIN est compact et peut être intéressant pour de grandes tables dont les valeurs suivent approximativement l'ordre physique des lignes.
+
+Exemple :
+
+```sql
+CREATE INDEX idx_ecritures_date_brin
+ON core.ecritures
+USING BRIN (date_operation);
+```
+
+Son efficacité dépend notamment de la corrélation entre l'ordre physique des lignes et les valeurs indexées.
+
+## 3. Mesure des performances
+
+Utiliser `EXPLAIN ANALYZE` pour examiner les plans d'exécution et mesurer le temps réel des requêtes.
+
+```sql
+EXPLAIN ANALYZE
+SELECT *
+FROM core.ecritures
+WHERE id_compte = 100
+ORDER BY date_operation;
+```
+
+Pour une comparaison pertinente, il faut utiliser les mêmes requêtes et les mêmes données pour chaque stratégie.
+
+Les temps peuvent varier selon la machine, le cache, la charge du serveur et l'état des statistiques PostgreSQL.
+
+## 4. Résultats observés
+
+Les résultats relevés pendant les tests sont les suivants :
+
+| Mesure | Résultat observé |
+|---|---:|
+| Première mesure | 0,741 ms |
+| Deuxième mesure | 0,152 ms |
+| Troisième mesure | 0,237 ms |
+| Recherche portant sur 100 % des comptes courants | Parcours séquentiel |
+| Taille de la table | 73 MB |
+| Taille d'un index B-tree | 30 MB |
+| Taille d'un index BRIN | 24 kB |
+| Taille de l'index partiel | 8192 octets |
+
+Ces chiffres correspondent aux mesures effectuées dans l'environnement de test. Ils ne constituent pas des performances garanties : les résultats dépendent du jeu de données et des conditions d'exécution.
+
+Un parcours séquentiel peut être préférable lorsqu'une requête doit lire une grande partie de la table. Un index n'est donc pas systématiquement plus rapide.
 
 ---
 
+# Conclusion
+
+Les étapes E0 à E5 couvrent la préparation de l'environnement, l'installation de PostgreSQL, la création de la base NovaBank, la gestion des rôles, la sécurisation des accès aux données et l'optimisation des performances.
+
+Les scripts SQL et shell restent les références pour les opérations détaillées. Après chaque étape, il est recommandé de vérifier les résultats avant de passer à la suivante.
